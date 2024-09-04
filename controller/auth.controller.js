@@ -1,19 +1,21 @@
 const db = require("../config/db");
 const jwt = require("../config/jwt");
 const crypto = require('crypto');
+const generateOTP = require('../utils/otp.generator')
+const { sendEmail } = require('../config/nodemailer')
 
 class AuthController {
     async registration(req, res) {
-        const { first_name, last_name, email, password, login } = req.body;  
+        const { first_name, last_name, email, password, login } = req.body.data;  
         let errors = [];
 
-        if (!firstName || firstName.length === 0) {
+        if (!first_name || first_name.length === 0) {
             errors.push({
                 "field": "firstName",
                 "message": "Укажите ваше имя"
             })
         }
-        if (!lastName || lastName.length === 0) {
+        if (!last_name || last_name.length === 0) {
             errors.push({
                 "field": "lastName",
                 "message": "Укажите вашу фамилию"
@@ -44,25 +46,38 @@ class AuthController {
             })
         }
         try {
-            let hashedPassword = crypto.createHash('md5').update(password).digest('hex')
+            const checkLogin = await db.query(`SELECT * FROM users WHERE login = $1`, [login]);
+            if (checkLogin.rowCount > 0) {
+                return res.status(409).json({error: "Пользователь с таким логином уже зарегистрирован на портале"})
+            }
+            const checkEmail = await db.query(`SELECT * FROM users WHERE email = $1`, [email]);
+            if (checkEmail.rowCount > 0) {
+                return res.status(409).json({error: "Пользователь с такой электронной почтой уже зарегистрирован на портале"})
+            }
+
+            const otp_code = generateOTP()
+            const otp_expiration = new Date(Date.now() + 10 * 60 * 1000);
+            const subject = 'Подтверждение Email'
+            const message = `Ваш код подтверждения: ${otp_code}`
+            sendEmail(email, subject, message)
+
+            const hashedPassword = crypto.createHash('md5').update(password).digest('hex')
             const createUser = await db.query(`
-                    INSERT INTO users (first_name, last_name, email, password, login) VALUES ($1, $2, $3, $4, $5) RETURNING id
-                `, [first_name, last_name, email, hashedPassword, login]);
+                    INSERT INTO users (first_name, last_name, email, password, login, otp_code, otp_expiration) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id
+                `, [first_name, last_name, email, hashedPassword, login, otp_code, otp_expiration]);
             const token = await jwt.generateToken({
                 userId: createUser.rows[0].id,
             })
             return res.status(201).json({
                 "status": "success",
                 "message": "Registration successful",
-                "data": {
-                    "accessToken": token,
-                    "user": {
-                        "id": createUser.rows[0].id,
-                        "first_name": first_name,
-                        "last_name": last_name,
-                        "email": email,
-                        "login": login, 
-                    }
+                "accessToken": token,
+                "user": {
+                    "id": createUser.rows[0].id,
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "email": email,
+                    "login": login, 
                 }
             })
         } 
@@ -70,6 +85,50 @@ class AuthController {
             res.status(500).json({error: e.message});
         }
     }
+
+    async resendOtp(req, res) {
+        const {email} = req.body;
+        const otp_code = generateOTP()
+        const otp_expiration = new Date(Date.now() + 10 * 60 * 1000);
+        const subject = 'Подтверждение Email'
+        const message = `Ваш код подтверждения: ${otp_code}`
+        sendEmail(email, subject, message)
+        try {
+            await db.query(`UPDATE users SET otp_code = $1, otp_expiration = $2 WHERE email = $3`, [otp_code, otp_expiration, email])
+            return res.status(200).json({
+                "status": "success",
+                "message": `Код подтверждения отправлен на ваш адрес электронной почты: ${email}`,
+            })
+        } catch (e) {
+            res.status(500).json({error: e.message});
+        }
+    }
+
+    async verifyEmail(req, res) {
+        const { email, otp } = req.body; 
+        try {
+            const query = await db.query(`SELECT * FROM users WHERE email = $1`, [email])
+            const user = query.rows[0];
+          
+            const OTPExpired = new Date() > new Date(user.otp_expiration) 
+            if (OTPExpired) return res.status(400).json({status: "error", message: "Срок действия кода подтверждения истек"});
+
+            const alreadyVerified = user.is_verified === true
+            if (alreadyVerified) return res.status(400).json({status: "error", message: "Электронная почта пользователя уже подтверждена"});
+
+            const isOtpRight = otp === user.otp_code;
+            if (!isOtpRight) {
+                return res.status(400).json({status: "error", message: "Неправильный код подтверждения"})
+            }
+
+            await db.query(`UPDATE users SET is_verified = $1 WHERE email = $2`, [true, email])
+
+            res.status(200).json({status: "successful", message: "Аккаунт подтвержден"})
+        } catch (e) {
+            res.status(500).json({error: e.message});
+        }
+    }
+
     async login(req, res) {
         const { email, password } = req.body;  
         if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !password || password.length === 0) {
