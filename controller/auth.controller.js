@@ -80,6 +80,50 @@ class AuthController {
         }
     }
 
+    async login(req, res) {
+        const { email, password } = req.body.data;  
+        if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !password || password.length === 0) {
+            return res.status(401).json({
+                "status": "Bad request",
+                "message": "Authentication failed",
+                "statusCode": 401
+            })
+        }
+        try {
+            let hashedPassword = crypto.createHash('md5').update(password).digest('hex')
+            const user = await db.query(`SELECT * FROM users WHERE email = $1 and password = $2`, [email, hashedPassword]);
+            if (user.rowCount > 0) {
+                const { id, first_name, last_name, login, is_verified, email } = user.rows[0];
+                if (!is_verified) {
+                    return res.status(403).json({
+                        "status": "failure",
+                        "message": "Email не подтвержден",
+                        "user": {
+                            "email": email,
+                        }
+                    })
+                }
+                return res.status(200).json({
+                    "status": "success",
+                    "message": "Login successful",
+                    "user": {
+                        "id": id,
+                        "first_name": first_name,
+                        "last_name": last_name,
+                        "email": email,
+                        "login": login, 
+                    }
+                })
+            }
+            else {
+                res.status(401).json({"status": 'failure', "message": "Неправильный логин/пароль"});
+            }
+        }
+        catch (e) {
+            res.status(500).json({error: e.message});
+        }
+    }
+
     async resendOtp(req, res) {
         const {email} = req.body;
         const otp_code = generateOTP()
@@ -99,7 +143,7 @@ class AuthController {
     }
 
     async verifyEmail(req, res) {
-        const { email, otp } = req.body; 
+        const { email, otp, is_main_confirm } = req.body; 
         try {
             const query = await db.query(`SELECT * FROM users WHERE email = $1`, [email])
             const user = query.rows[0];
@@ -107,62 +151,19 @@ class AuthController {
             const OTPExpired = new Date() > new Date(user.otp_expiration) 
             if (OTPExpired) return res.status(400).json({status: "error", message: "Срок действия кода подтверждения истек"});
 
-            const alreadyVerified = user.is_verified === true
+            const alreadyVerified = user.is_verified === true && is_main_confirm;
             if (alreadyVerified) return res.status(400).json({status: "error", message: "Электронная почта пользователя уже подтверждена"});
 
             const isOtpRight = otp === user.otp_code;
             if (!isOtpRight) {
                 return res.status(400).json({status: "error", message: "Неправильный код подтверждения"})
             }
+            if (is_main_confirm) {
+                await db.query(`UPDATE users SET is_verified = $1 WHERE email = $2`, [true, email])
+            }
 
-            await db.query(`UPDATE users SET is_verified = $1 WHERE email = $2`, [true, email])
-
-            res.status(200).json({status: "successful", message: "Аккаунт подтвержден"})
+                res.status(200).json({status: "successful", message: "Аккаунт подтвержден"})
         } catch (e) {
-            res.status(500).json({error: e.message});
-        }
-    }
-
-    async login(req, res) {
-        const { email, password } = req.body.data;  
-        if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !password || password.length === 0) {
-            return res.status(401).json({
-                "status": "Bad request",
-                "message": "Authentication failed",
-                "statusCode": 401
-            })
-        }
-        try {
-            let hashedPassword = crypto.createHash('md5').update(password).digest('hex')
-            const user = await db.query(`SELECT * FROM users WHERE email = $1 and password = $2`, [email, hashedPassword]);
-            if (user.rowCount > 0) {
-                const { id, first_name, last_name, login, is_verified, email } = user.rows[0];
-                if (!is_verified) {
-                    return res.status(401).json({
-                        "status": "failure",
-                        "message": "Email не подтвержден",
-                        "user": {
-                            "email": email,
-                        }
-                    })
-                }
-                return res.status(201).json({
-                    "status": "success",
-                    "message": "Login successful",
-                    "user": {
-                        "id": id,
-                        "first_name": first_name,
-                        "last_name": last_name,
-                        "email": email,
-                        "login": login, 
-                    }
-                })
-            }
-            else {
-                res.status(404).json({message: "Неправильный логин/пароль"});
-            }
-        }
-        catch (e) {
             res.status(500).json({error: e.message});
         }
     }
@@ -181,6 +182,26 @@ class AuthController {
                 return res.status(200).json({
                     "status": "success",
                     "message": `Пользователь с такой почтой найден`,
+                })
+            }
+            else {
+                res.status(404).json({message: "Пользователь с такой электронной почтой не найден"});
+            }
+        } catch (e) {
+            res.status(500).json({error: e.message});
+        }
+    }
+
+
+    async resetPassword(req, res) {
+        const {email, password} = req.body;
+        try {
+            const hashedPassword = crypto.createHash('md5').update(password).digest('hex')
+            const query = await db.query(`UPDATE users SET password=$1 WHERE email=$2`, [hashedPassword, email]);
+            if (query.rowCount > 0) {
+                return res.status(200).json({
+                    "status": "success",
+                    "message": `Пароль успешно изменен`,
                 })
             }
             else {
