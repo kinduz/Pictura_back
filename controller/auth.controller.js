@@ -55,16 +55,10 @@ class AuthController {
                 return res.status(409).json({error: "Пользователь с такой электронной почтой уже зарегистрирован на портале"})
             }
 
-            const otp_code = generateOTP()
-            const otp_expiration = new Date(Date.now() + 10 * 60 * 1000);
-            const subject = 'Подтверждение Email'
-            const message = `Ваш код подтверждения: ${otp_code}`
-            sendEmail(email, subject, message)
-
             const hashedPassword = crypto.createHash('md5').update(password).digest('hex')
             const createUser = await db.query(`
-                    INSERT INTO users (first_name, last_name, email, password, login, otp_code, otp_expiration) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id
-                `, [first_name, last_name, email, hashedPassword, login, otp_code, otp_expiration]);
+                    INSERT INTO users (first_name, last_name, email, password, login) VALUES ($1, $2, $3, $4, $5) RETURNING id
+                `, [first_name, last_name, email, hashedPassword, login]);
             const token = await jwt.generateToken({
                 userId: createUser.rows[0].id,
             })
@@ -130,7 +124,7 @@ class AuthController {
     }
 
     async login(req, res) {
-        const { email, password } = req.body;  
+        const { email, password } = req.body.data;  
         if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !password || password.length === 0) {
             return res.status(401).json({
                 "status": "Bad request",
@@ -142,7 +136,16 @@ class AuthController {
             let hashedPassword = crypto.createHash('md5').update(password).digest('hex')
             const user = await db.query(`SELECT * FROM users WHERE email = $1 and password = $2`, [email, hashedPassword]);
             if (user.rowCount > 0) {
-                const { id, first_name, last_name, login } = user.rows[0];
+                const { id, first_name, last_name, login, is_verified, email } = user.rows[0];
+                if (!is_verified) {
+                    return res.status(401).json({
+                        "status": "failure",
+                        "message": "Email не подтвержден",
+                        "user": {
+                            "email": email,
+                        }
+                    })
+                }
                 return res.status(201).json({
                     "status": "success",
                     "message": "Login successful",
@@ -156,13 +159,38 @@ class AuthController {
                 })
             }
             else {
-                res.status(404).json({error: "Пользователь с такими данными не найден"});
+                res.status(404).json({message: "Неправильный логин/пароль"});
             }
         }
         catch (e) {
             res.status(500).json({error: e.message});
         }
     }
+
+    async checkEmail(req, res) {
+        const {email} = req.body;
+        try {
+            const query = await db.query(`SELECT * FROM users WHERE email = $1`, [email]);
+            if (query.rowCount > 0) {
+                if (!query.rows[0].is_verified) {
+                    return res.status(401).json({
+                        "status": "failure",
+                        "message": `Электронная почта пользователя не подтверждена`,
+                    })  
+                }
+                return res.status(200).json({
+                    "status": "success",
+                    "message": `Пользователь с такой почтой найден`,
+                })
+            }
+            else {
+                res.status(404).json({message: "Пользователь с такой электронной почтой не найден"});
+            }
+        } catch (e) {
+            res.status(500).json({error: e.message});
+        }
+    }
+    
 } 
 
 module.exports = new AuthController();
