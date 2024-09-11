@@ -144,11 +144,13 @@ class UserController {
 
     async resendOtp(req, res) {
         const {email} = req.body;
+        const user = (await db.query(`SELECT * FROM users WHERE email = $1`, [email])).rows[0];
+        const userName = `${user.last_name} ${user.first_name}`;
         const otp_code = generateOTP()
         const otp_expiration = new Date(Date.now() + 10 * 60 * 1000);
-        const subject = 'Подтверждение Email'
+        const subject = 'Код подтверждения в Pictura';
         const message = `Ваш код подтверждения: ${otp_code}`
-        sendEmail(email, subject, message)
+        sendEmail(email, subject, message, userName, otp_code)
         try {
             await db.query(`UPDATE users SET otp_code = $1, otp_expiration = $2 WHERE email = $3`, [otp_code, otp_expiration, email])
             return res.status(200).json({
